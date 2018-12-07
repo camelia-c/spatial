@@ -1,20 +1,20 @@
 /**
- * Copyright (c) 2010-2013 "Neo Technology,"
+ * Copyright (c) 2010-2017 "Neo Technology,"
  * Network Engine for Objects in Lund AB [http://neotechnology.com]
  * <p>
- * This file is part of Neo4j.
+ * This file is part of Neo4j Spatial.
  * <p>
  * Neo4j is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
  * <p>
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ * GNU General Public License for more details.
  * <p>
- * You should have received a copy of the GNU Affero General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 package org.neo4j.gis.spatial.procedures;
@@ -25,29 +25,34 @@ import com.vividsolutions.jts.geom.Geometry;
 import com.vividsolutions.jts.geom.Point;
 import com.vividsolutions.jts.io.ParseException;
 import com.vividsolutions.jts.io.WKTReader;
-import org.neo4j.cypher.internal.compiler.v3_1.GeographicPoint;
+import org.geotools.referencing.crs.DefaultGeographicCRS;
 import org.neo4j.gis.spatial.*;
 import org.neo4j.gis.spatial.encoders.SimpleGraphEncoder;
 import org.neo4j.gis.spatial.encoders.SimplePointEncoder;
 import org.neo4j.gis.spatial.encoders.SimplePropertyEncoder;
+import org.neo4j.gis.spatial.index.LayerGeohashPointIndex;
+import org.neo4j.gis.spatial.index.LayerHilbertPointIndex;
+import org.neo4j.gis.spatial.index.LayerZOrderPointIndex;
 import org.neo4j.gis.spatial.osm.OSMGeometryEncoder;
 import org.neo4j.gis.spatial.osm.OSMImporter;
 import org.neo4j.gis.spatial.pipes.GeoPipeFlow;
 import org.neo4j.gis.spatial.pipes.GeoPipeline;
+import org.neo4j.gis.spatial.pipes.processing.OrthodromicDistance;
 import org.neo4j.gis.spatial.rtree.ProgressLoggingListener;
 import org.neo4j.graphdb.GraphDatabaseService;
 import org.neo4j.graphdb.Node;
 import org.neo4j.graphdb.PropertyContainer;
-import org.neo4j.graphdb.Transaction;
 import org.neo4j.graphdb.spatial.CRS;
-import org.neo4j.kernel.api.proc.ProcedureSignature;
+import org.neo4j.internal.kernel.api.procs.ProcedureSignature;
 import org.neo4j.kernel.impl.proc.Procedures;
 import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.logging.Log;
-import org.neo4j.procedure.Context;
-import org.neo4j.procedure.Name;
-import org.neo4j.procedure.PerformsWrites;
-import org.neo4j.procedure.Procedure;
+import org.neo4j.procedure.*;
+
+import static org.neo4j.gis.spatial.SpatialDatabaseService.RTREE_INDEX_NAME;
+import static org.neo4j.helpers.collection.MapUtil.map;
+import static org.neo4j.procedure.Mode.*;
+
 import org.opengis.referencing.ReferenceIdentifier;
 import org.opengis.referencing.crs.CoordinateReferenceSystem;
 
@@ -67,7 +72,6 @@ TODO:
 
 public class SpatialProcedures {
 
-    public static final String DISTANCE = "OrthodromicDistance";
     @Context
     public GraphDatabaseService db;
 
@@ -121,8 +125,13 @@ public class SpatialProcedures {
     public static class GeometryResult {
         public final Object geometry;
 
-        public GeometryResult(Object geometry) {
-            this.geometry = geometry;
+        public GeometryResult(org.neo4j.graphdb.spatial.Geometry geometry) {
+            // Unfortunately Neo4j 3.4 only copes with Points, other types need to be converted to a public type
+            if(geometry instanceof org.neo4j.graphdb.spatial.Point) {
+                this.geometry = geometry;
+            }else{
+                this.geometry = toMap(geometry);
+            }
         }
     }
 
@@ -147,6 +156,7 @@ public class SpatialProcedures {
     }
 
     @Procedure("spatial.procedures")
+    @Description("Lists all spatial procedures with name and signature")
     public Stream<NameResult> listProcedures() {
         Procedures procedures = ((GraphDatabaseAPI) db).getDependencyResolver().resolveDependency(Procedures.class);
         Stream.Builder<NameResult> builder = Stream.builder();
@@ -158,8 +168,8 @@ public class SpatialProcedures {
         return builder.build();
     }
 
-    @Procedure("spatial.layers")
-    @PerformsWrites // TODO FIX - due to lazy evaluation of index count, updated during later reads, not during writes
+    @Procedure(value="spatial.layers", mode = WRITE)
+    @Description("Returns name, and details for all layers")
     public Stream<NameResult> getAllLayers() {
         Stream.Builder<NameResult> builder = Stream.builder();
         SpatialDatabaseService spatial = wrap(db);
@@ -173,6 +183,7 @@ public class SpatialProcedures {
     }
 
     @Procedure("spatial.layerTypes")
+    @Description("Returns the different registered layer types")
     public Stream<NameResult> getAllLayerTypes() {
         Stream.Builder<NameResult> builder = Stream.builder();
         for (Map.Entry<String, String> entry : wrap(db).getRegisteredLayerTypes().entrySet()) {
@@ -181,30 +192,78 @@ public class SpatialProcedures {
         return builder.build();
     }
 
-    @Procedure("spatial.addPointLayer")
-    @PerformsWrites
-    public Stream<NodeResult> addSimplePointLayer(@Name("name") String name) {
+    @Procedure(value="spatial.addPointLayer", mode=WRITE)
+    @Description("Adds a new simple point layer, returns the layer root node")
+    public Stream<NodeResult> addSimplePointLayer(
+            @Name("name") String name,
+            @Name(value = "indexType", defaultValue = RTREE_INDEX_NAME) String indexType,
+            @Name(value = "crsName", defaultValue = UNSET_CRS_NAME) String crsName) {
         SpatialDatabaseService sdb = wrap(db);
         Layer layer = sdb.getLayer(name);
         if (layer == null) {
-            return streamNode(sdb.createLayer(name, SimplePointEncoder.class, SimplePointLayer.class).getLayerNode());
+            return streamNode(sdb.createLayer(name, SimplePointEncoder.class, SimplePointLayer.class,
+                    sdb.resolveIndexClass(indexType), null,
+                    selectCRS(crsName)).getLayerNode());
         } else {
             throw new IllegalArgumentException("Cannot create existing layer: " + name);
         }
     }
 
-    @Procedure("spatial.addPointLayerXY")
-    @PerformsWrites
+    @Procedure(value="spatial.addPointLayerGeohash", mode=WRITE)
+    @Description("Adds a new simple point layer with geohash based index, returns the layer root node")
+    public Stream<NodeResult> addSimplePointLayerGeohash(
+            @Name("name") String name,
+            @Name(value = "crsName", defaultValue = WGS84_CRS_NAME) String crsName) {
+        SpatialDatabaseService sdb = wrap(db);
+        Layer layer = sdb.getLayer(name);
+        if (layer == null) {
+            return streamNode(sdb.createLayer(name, SimplePointEncoder.class, SimplePointLayer.class,
+                    LayerGeohashPointIndex.class, null,
+                    selectCRS(crsName)).getLayerNode());
+        } else {
+            throw new IllegalArgumentException("Cannot create existing layer: " + name);
+        }
+    }
+
+    @Procedure(value="spatial.addPointLayerZOrder", mode=WRITE)
+    @Description("Adds a new simple point layer with z-order curve based index, returns the layer root node")
+    public Stream<NodeResult> addSimplePointLayerZOrder(@Name("name") String name) {
+        SpatialDatabaseService sdb = wrap(db);
+        Layer layer = sdb.getLayer(name);
+        if (layer == null) {
+            return streamNode(sdb.createLayer(name, SimplePointEncoder.class, SimplePointLayer.class, LayerZOrderPointIndex.class, null, DefaultGeographicCRS.WGS84).getLayerNode());
+        } else {
+            throw new IllegalArgumentException("Cannot create existing layer: " + name);
+        }
+    }
+
+    @Procedure(value="spatial.addPointLayerHilbert", mode=WRITE)
+    @Description("Adds a new simple point layer with hilbert curve based index, returns the layer root node")
+    public Stream<NodeResult> addSimplePointLayerHilbert(@Name("name") String name) {
+        SpatialDatabaseService sdb = wrap(db);
+        Layer layer = sdb.getLayer(name);
+        if (layer == null) {
+            return streamNode(sdb.createLayer(name, SimplePointEncoder.class, SimplePointLayer.class, LayerHilbertPointIndex.class, null, DefaultGeographicCRS.WGS84).getLayerNode());
+        } else {
+            throw new IllegalArgumentException("Cannot create existing layer: " + name);
+        }
+    }
+
+    @Procedure(value="spatial.addPointLayerXY", mode=WRITE)
+    @Description("Adds a new simple point layer with the given properties for x and y coordinates, returns the layer root node")
     public Stream<NodeResult> addSimplePointLayer(
             @Name("name") String name,
             @Name("xProperty") String xProperty,
-            @Name("yProperty") String yProperty) {
+            @Name("yProperty") String yProperty,
+            @Name(value = "indexType", defaultValue = RTREE_INDEX_NAME) String indexType,
+            @Name(value = "crsName", defaultValue = UNSET_CRS_NAME) String crsName) {
         SpatialDatabaseService sdb = wrap(db);
         Layer layer = sdb.getLayer(name);
         if (layer == null) {
             if (xProperty != null && yProperty != null) {
-                String encoderConfig = xProperty + ":" + yProperty;
-                return streamNode(sdb.createLayer(name, SimplePointEncoder.class, SimplePointLayer.class, encoderConfig).getLayerNode());
+                return streamNode(sdb.createLayer(name, SimplePointEncoder.class, SimplePointLayer.class,
+                        sdb.resolveIndexClass(indexType), sdb.makeEncoderConfig(xProperty, yProperty),
+                        selectCRS(hintCRSName(crsName, yProperty))).getLayerNode());
             } else {
                 throw new IllegalArgumentException("Cannot create layer '" + name + "': Missing encoder config values: xProperty[" + xProperty + "], yProperty[" + yProperty + "]");
             }
@@ -213,16 +272,20 @@ public class SpatialProcedures {
         }
     }
 
-    @Procedure("spatial.addPointLayerWithConfig")
-    @PerformsWrites
-    public Stream<NodeResult> addSimplePointLayer(
+    @Procedure(value="spatial.addPointLayerWithConfig", mode=WRITE)
+    @Description("Adds a new simple point layer with the given configuration, returns the layer root node")
+    public Stream<NodeResult> addSimplePointLayerWithConfig(
             @Name("name") String name,
-            @Name("encoderConfig") String encoderConfig) {
+            @Name("encoderConfig") String encoderConfig,
+            @Name(value = "indexType", defaultValue = RTREE_INDEX_NAME) String indexType,
+            @Name(value = "crsName", defaultValue = UNSET_CRS_NAME) String crsName) {
         SpatialDatabaseService sdb = wrap(db);
         Layer layer = sdb.getLayer(name);
         if (layer == null) {
             if (encoderConfig.indexOf(':') > 0) {
-                return streamNode(sdb.createLayer(name, SimplePointEncoder.class, SimplePointLayer.class, encoderConfig).getLayerNode());
+                return streamNode(sdb.createLayer(name, SimplePointEncoder.class, SimplePointLayer.class,
+                        sdb.resolveIndexClass(indexType), encoderConfig,
+                        selectCRS(hintCRSName(crsName, encoderConfig))).getLayerNode());
             } else {
                 throw new IllegalArgumentException("Cannot create layer '" + name + "': invalid encoder config '" + encoderConfig + "'");
             }
@@ -231,9 +294,40 @@ public class SpatialProcedures {
         }
     }
 
-    @Procedure("spatial.addLayerWithEncoder")
-    @PerformsWrites
-    public Stream<NodeResult> addLayer(
+    public static final String UNSET_CRS_NAME = "";
+    public static final String WGS84_CRS_NAME = "wgs84";
+
+    /**
+     * Currently this only supports the string 'WGS84', for the convenience of procedure users.
+     * This should be expanded with CRS table lookup.
+     * @param name
+     * @return null or WGS84
+     */
+    public CoordinateReferenceSystem selectCRS(String name) {
+        if (name == null) {
+            return null;
+        } else {
+            switch (name.toLowerCase()) {
+                case WGS84_CRS_NAME:
+                    return org.geotools.referencing.crs.DefaultGeographicCRS.WGS84;
+                case UNSET_CRS_NAME:
+                    return null;
+                default:
+                    throw new IllegalArgumentException("Unsupported CRS name: " + name);
+            }
+        }
+    }
+
+    private String hintCRSName(String crsName, String hint) {
+        if (crsName.equals(UNSET_CRS_NAME) && hint.toLowerCase().contains("lat")) {
+            crsName = WGS84_CRS_NAME;
+        }
+        return crsName;
+    }
+
+    @Procedure(value="spatial.addLayerWithEncoder", mode=WRITE)
+    @Description("Adds a new layer with the given encoder class and configuration, returns the layer root node")
+    public Stream<NodeResult> addLayerWithEncoder(
             @Name("name") String name,
             @Name("encoder") String encoderClassName,
             @Name("encoderConfig") String encoderConfig) {
@@ -243,7 +337,7 @@ public class SpatialProcedures {
             Class encoderClass = encoderClasses.get(encoderClassName);
             Class layerClass = sdb.suggestLayerClassForEncoder(encoderClass);
             if (encoderClass != null) {
-                return streamNode(sdb.createLayer(name, encoderClass, layerClass, encoderConfig).getLayerNode());
+                return streamNode(sdb.createLayer(name, encoderClass, layerClass, null, encoderConfig).getLayerNode());
             } else {
                 throw new IllegalArgumentException("Cannot create layer '" + name + "': invalid encoder class '" + encoderClassName + "'");
             }
@@ -252,8 +346,8 @@ public class SpatialProcedures {
         }
     }
 
-    @Procedure("spatial.addLayer")
-    @PerformsWrites
+    @Procedure(value="spatial.addLayer", mode=WRITE)
+    @Description("Adds a new layer with the given type (see spatial.getAllLayerTypes) and configuration, returns the layer root node")
     public Stream<NodeResult> addLayerOfType(
             @Name("name") String name,
             @Name("type") String type,
@@ -262,7 +356,7 @@ public class SpatialProcedures {
         Layer layer = sdb.getLayer(name);
         if (layer == null) {
             Map<String, String> knownTypes = sdb.getRegisteredLayerTypes();
-            if (knownTypes.containsKey(type)) {
+            if (knownTypes.containsKey(type.toLowerCase())) {
                 return streamNode(sdb.getOrCreateRegisteredTypeLayer(name, type, encoderConfig).getLayerNode());
             } else {
                 throw new IllegalArgumentException("Cannot create layer '" + name + "': unknown type '" + type + "' - supported types are " + knownTypes.toString());
@@ -276,29 +370,28 @@ public class SpatialProcedures {
         return Stream.of(new NodeResult(node));
     }
 
-    @Procedure("spatial.addWKTLayer")
-    @PerformsWrites
+    @Procedure(value="spatial.addWKTLayer", mode=WRITE)
+    @Description("Adds a new WKT layer with the given node property to hold the WKT string, returns the layer root node")
     public Stream<NodeResult> addWKTLayer(@Name("name") String name,
                                           @Name("nodePropertyName") String nodePropertyName) {
         return addLayerOfType(name, "WKT", nodePropertyName);
     }
 
-    // todo do we need this?
-    @Procedure("spatial.layer")
-    @PerformsWrites // TODO FIX - due to lazy evaluation of index count, updated during later reads, not during writes
+    @Procedure(value="spatial.layer", mode=WRITE)
+    @Description("Returns the layer root node for the given layer name")
     public Stream<NodeResult> getLayer(@Name("name") String name) {
         return streamNode(getLayerOrThrow(name).getLayerNode());
     }
 
-    @Procedure("spatial.getFeatureAttributes")
-    @PerformsWrites
+    @Procedure(value="spatial.getFeatureAttributes", mode=WRITE)
+    @Description("Returns feature attributes of the given layer")
     public Stream<StringResult> getFeatureAttributes(@Name("name") String name) {
         Layer layer = this.getLayerOrThrow(name);
         return Arrays.asList(layer.getExtraPropertyNames()).stream().map(StringResult::new);
     }
 
-    @Procedure("spatial.setFeatureAttributes")
-    @PerformsWrites
+    @Procedure(value="spatial.setFeatureAttributes", mode=WRITE)
+    @Description("Sets the feature attributes of the given layer")
     public Stream<NodeResult> setFeatureAttributes(@Name("name") String name,
                                                    @Name("attributeNames") List<String> attributeNames) {
         EditableLayerImpl layer = this.getEditableLayerOrThrow(name);
@@ -306,40 +399,36 @@ public class SpatialProcedures {
         return streamNode(layer.getLayerNode());
     }
 
-    @Procedure("spatial.removeLayer")
-    @PerformsWrites
+    @Procedure(value="spatial.removeLayer", mode=WRITE)
+    @Description("Removes the given layer")
     public void removeLayer(@Name("name") String name) {
         wrap(db).deleteLayer(name, new ProgressLoggingListener("Deleting layer '" + name + "'", log.infoLogger()));
     }
 
-    // todo do we want to return anything ? or just a count?
-    @Procedure("spatial.addNode")
-    @PerformsWrites
+    @Procedure(value="spatial.addNode", mode=WRITE)
+    @Description("Adds the given node to the layer, returns the geometry-node")
     public Stream<NodeResult> addNodeToLayer(@Name("layerName") String name, @Name("node") Node node) {
         EditableLayer layer = getEditableLayerOrThrow(name);
         return streamNode(layer.add(node).getGeomNode());
     }
 
-    // todo do we want to return anything ? or just a count?
-    @Procedure("spatial.addNodes")
-    @PerformsWrites
+    @Procedure(value="spatial.addNodes", mode=WRITE)
+    @Description("Adds the given nodes list to the layer, returns the count")
     public Stream<CountResult> addNodesToLayer(@Name("layerName") String name, @Name("nodes") List<Node> nodes) {
         EditableLayer layer = getEditableLayerOrThrow(name);
         return Stream.of(new CountResult(layer.addAll(nodes)));
     }
 
-    // todo do we want to return anything ? or just a count?
-    @Procedure("spatial.addWKT")
-    @PerformsWrites
+    @Procedure(value="spatial.addWKT", mode=WRITE)
+    @Description("Adds the given WKT string to the layer, returns the created geometry node")
     public Stream<NodeResult> addGeometryWKTToLayer(@Name("layerName") String name, @Name("geometry") String geometryWKT) throws ParseException {
         EditableLayer layer = getEditableLayerOrThrow(name);
         WKTReader reader = new WKTReader(layer.getGeometryFactory());
         return streamNode(addGeometryWkt(layer, reader, geometryWKT));
     }
 
-    // todo do we want to return anything ? or just a count?
-    @Procedure("spatial.addWKTs")
-    @PerformsWrites
+    @Procedure(value="spatial.addWKTs", mode=WRITE)
+    @Description("Adds the given WKT string list to the layer, returns the created geometry nodes")
     public Stream<NodeResult> addGeometryWKTsToLayer(@Name("layerName") String name, @Name("geometry") List<String> geometryWKTs) throws ParseException {
         EditableLayer layer = getEditableLayerOrThrow(name);
         WKTReader reader = new WKTReader(layer.getGeometryFactory());
@@ -355,27 +444,8 @@ public class SpatialProcedures {
         }
     }
 
-    // todo do we need this procedure??
-    @Procedure("spatial.updateFromWKT")
-    @PerformsWrites
-    public Stream<NodeResult> updateGeometryFromWKT(@Name("layerName") String name, @Name("geometry") String geometryWKT,
-                                                    @Name("geometryNodeId") long geometryNodeId) {
-        try (Transaction tx = db.beginTx()) {
-            EditableLayer layer = getEditableLayerOrThrow(name);
-            WKTReader reader = new WKTReader(layer.getGeometryFactory());
-            Geometry geometry = reader.read(geometryWKT);
-            SpatialDatabaseRecord record = layer.getIndex().get(geometryNodeId);
-            layer.getGeometryEncoder().encodeGeometry(geometry, record.getGeomNode());
-            tx.success();
-            return streamNode(record.getGeomNode());
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-        return null;
-    }
-
-    @Procedure("spatial.importShapefileToLayer")
-    @PerformsWrites
+    @Procedure(value="spatial.importShapefileToLayer", mode=WRITE)
+    @Description("Imports the the provided shape-file from URI to the given layer, returns the count of data added")
     public Stream<CountResult> importShapefile(
             @Name("layerName") String name,
             @Name("uri") String uri) throws IOException {
@@ -383,8 +453,8 @@ public class SpatialProcedures {
         return Stream.of(new CountResult(importShapefileToLayer(uri, layer, 1000).size()));
     }
 
-    @Procedure("spatial.importShapefile")
-    @PerformsWrites
+    @Procedure(value="spatial.importShapefile", mode=WRITE)
+    @Description("Imports the the provided shape-file from URI to a layer of the same name, returns the count of data added")
     public Stream<CountResult> importShapefile(
             @Name("uri") String uri) throws IOException {
         return Stream.of(new CountResult(importShapefileToLayer(uri, null, 1000).size()));
@@ -405,8 +475,8 @@ public class SpatialProcedures {
         }
     }
 
-    @Procedure("spatial.importOSMToLayer")
-    @PerformsWrites
+    @Procedure(value="spatial.importOSMToLayer", mode=WRITE)
+    @Description("Imports the the provided osm-file from URI to a layer, returns the count of data added")
     public Stream<CountResult> importOSM(
             @Name("layerName") String name,
             @Name("uri") String uri) throws IOException, XMLStreamException {
@@ -414,8 +484,8 @@ public class SpatialProcedures {
         return Stream.of(new CountResult(importOSMToLayer(uri, layer, 1000)));
     }
 
-    @Procedure("spatial.importOSM")
-    @PerformsWrites
+    @Procedure(value="spatial.importOSM", mode=WRITE)
+    @Description("Imports the the provided osm-file from URI to a layer of the same name, returns the count of data added")
     public Stream<CountResult> importOSM(
             @Name("uri") String uri) throws IOException, XMLStreamException {
         return Stream.of(new CountResult(importOSMToLayer(uri, null, 1000)));
@@ -430,11 +500,11 @@ public class SpatialProcedures {
         String layerName = (layer == null) ? osmPath.substring(osmPath.lastIndexOf(File.separator) + 1) : layer.getName();
         OSMImporter importer = new OSMImporter(layerName, new ProgressLoggingListener("Importing " + osmPath, log.debugLogger()));
         importer.importFile( db, osmPath, false, commitInterval, true );
-        return importer.reIndex( db, commitInterval );
+        return importer.reIndex( db, commitInterval, false );
     }
 
-    @Procedure("spatial.bbox")
-    @PerformsWrites // TODO FIX
+    @Procedure(value="spatial.bbox", mode=WRITE)
+    @Description("Finds all geometry nodes in the given layer within the lower left and upper right coordinates of a box")
     public Stream<NodeResult> findGeometriesInBBox(
             @Name("layerName") String name,
             @Name("min") Object min,
@@ -447,8 +517,8 @@ public class SpatialProcedures {
                 .stream().map(GeoPipeFlow::getGeomNode).map(NodeResult::new);
     }
 
-    @Procedure("spatial.closest")
-    @PerformsWrites // TODO FIX
+    @Procedure(value="spatial.closest", mode=WRITE)
+    @Description("Finds all geometry nodes in the layer within the distance to the given coordinate")
     public Stream<NodeResult> findClosestGeometries(
             @Name("layerName") String name,
             @Name("coordinate") Object coordinate,
@@ -460,8 +530,8 @@ public class SpatialProcedures {
         return edgeResults.stream().map(e -> e.getValue().getGeomNode()).map(NodeResult::new);
     }
 
-    @Procedure("spatial.withinDistance")
-    @PerformsWrites // TODO FIX
+    @Procedure(value="spatial.withinDistance", mode=WRITE)
+    @Description("Returns all geometry nodes and their ordered distance in the layer within the distance to the given coordinate")
     public Stream<NodeDistanceResult> findGeometriesWithinDistance(
             @Name("layerName") String name,
             @Name("coordinate") Object coordinate,
@@ -470,47 +540,59 @@ public class SpatialProcedures {
         Layer layer = getLayerOrThrow(name);
         return GeoPipeline
                 .startNearestNeighborLatLonSearch(layer, toCoordinate(coordinate), distanceInKm)
-                .sort(DISTANCE)
+                .sort(OrthodromicDistance.DISTANCE)
                 .stream().map(r -> {
-                    double distance = r.hasProperty(DISTANCE) ? ((Number) r.getProperty(DISTANCE)).doubleValue() : -1;
+                    double distance = r.hasProperty(OrthodromicDistance.DISTANCE) ? ((Number) r.getProperty(OrthodromicDistance.DISTANCE)).doubleValue() : -1;
                     return new NodeDistanceResult(r.getGeomNode(), distance);
                 });
     }
 
-    @Procedure("spatial.decodeGeometry")
-    // TODO: This currently returns an internal Cypher type, in order to be able to pass back into
-    // other procedures that only accept internal cypher types due to a bug in Neo4j 3.0
-    // If you need to return Geometries outside (eg. RETURN geometry), then consider spatial.asExternalGeometry(geometry)
-    public Stream<GeometryResult> decodeGeometry(
+    @UserFunction("spatial.decodeGeometry")
+    @Description("Returns a geometry of a layer node as the Neo4j geometry type, to be passed to other procedures or returned to a client")
+    public Object decodeGeometry(
             @Name("layerName") String name,
             @Name("node") Node node) {
 
         Layer layer = getLayerOrThrow(name);
-        return Stream.of(layer.getGeometryEncoder().decodeGeometry(node)).map(geom -> new GeometryResult(toCypherGeometry(layer, geom)));
+        GeometryResult result = new GeometryResult(toNeo4jGeometry(layer, layer.getGeometryEncoder().decodeGeometry(node)));
+        return result.geometry;
     }
 
-    @Procedure("spatial.asGeometry")
-    // TODO: This currently returns an internal Cypher type, in order to be able to pass back into
-    // other procedures that only accept internal cypher types due to a bug in Neo4j 3.0
-    // If you need to return Geometries outside (eg. RETURN geometry), then consider spatial.asExternalGeometry(geometry)
-    public Stream<GeometryResult> asGeometry(
+    @UserFunction("spatial.asMap")
+    @Description("Returns a Map object representing the Geometry, to be passed to other procedures or returned to a client")
+    public Object asMap(@Name("object") Object geometry) {
+        return toGeometryMap(geometry);
+    }
+
+    @UserFunction("spatial.asGeometry")
+    @Description("Returns a geometry object as the Neo4j geometry type, to be passed to other functions or procedures or returned to a client")
+    public Object asGeometry(
             @Name("geometry") Object geometry) {
 
-        return Stream.of(geometry).map(geom -> new GeometryResult(toCypherGeometry(null, geom)));
+        return toNeo4jGeometry(null, geometry);
     }
 
-    @Procedure("spatial.asExternalGeometry")
-    // TODO: This method only exists (and differs from spatial.asGeometry()) because of a bug in Cypher 3.0
-    // Cypher will emit external geometry types but can only consume internal types. Once that bug is fixed,
-    // We can make both asGeometry() and asExternalGeometry() return the same public type, and deprecate this procedure.
+    @Deprecated
+    @Procedure("spatial.asGeometry")
+    @Description("Returns a geometry object as the Neo4j geometry type, to be passed to other procedures or returned to a client")
+    public Stream<GeometryResult> asGeometryProc(
+            @Name("geometry") Object geometry) {
+
+        return Stream.of(geometry).map(geom -> new GeometryResult(toNeo4jGeometry(null, geom)));
+    }
+
+    @Deprecated
+    @Procedure(value = "spatial.asExternalGeometry", deprecatedBy = "spatial.asGeometry")
+    @Description("Returns a geometry object as an external geometry type to be returned to a client")
+    // This only existed temporarily because the other method, asGeometry, returned the wrong type due to a bug in Neo4j 3.0
     public Stream<GeometryResult> asExternalGeometry(
             @Name("geometry") Object geometry) {
 
         return Stream.of(geometry).map(geom -> new GeometryResult(toNeo4jGeometry(null, geom)));
     }
 
-    @Procedure("spatial.intersects")
-    @PerformsWrites // TODO FIX
+    @Procedure(value="spatial.intersects", mode=WRITE)
+    @Description("Returns all geometry nodes that intersect the given geometry (shape, polygon) in the layer")
     public Stream<NodeResult> findGeometriesIntersecting(
             @Name("layerName") String name,
             @Name("geometry") Object geometry) {
@@ -588,7 +670,7 @@ public class SpatialProcedures {
         }
     }
 
-    private org.neo4j.graphdb.spatial.Coordinate toNeo4jCoordinate(Coordinate coordinate) {
+    private static org.neo4j.graphdb.spatial.Coordinate toNeo4jCoordinate(Coordinate coordinate) {
         if (coordinate.z == Coordinate.NULL_ORDINATE) {
             return new org.neo4j.graphdb.spatial.Coordinate(coordinate.x, coordinate.y);
         } else {
@@ -596,7 +678,7 @@ public class SpatialProcedures {
         }
     }
 
-    private List<org.neo4j.graphdb.spatial.Coordinate> toNeo4jCoordinates(Coordinate[] coordinates) {
+    private static List<org.neo4j.graphdb.spatial.Coordinate> toNeo4jCoordinates(Coordinate[] coordinates) {
         ArrayList<org.neo4j.graphdb.spatial.Coordinate> converted = new ArrayList<>();
         for (Coordinate coordinate : coordinates) {
             converted.add(toNeo4jCoordinate(coordinate));
@@ -604,7 +686,7 @@ public class SpatialProcedures {
         return converted;
     }
 
-    private org.neo4j.graphdb.spatial.Geometry toNeo4jGeometry(Layer layer, Object value) {
+    private static org.neo4j.graphdb.spatial.Geometry toNeo4jGeometry(Layer layer, Object value) {
         if (value instanceof org.neo4j.graphdb.spatial.Geometry) {
             return (org.neo4j.graphdb.spatial.Geometry) value;
         }
@@ -644,77 +726,71 @@ public class SpatialProcedures {
         throw new RuntimeException("Can't convert " + value + " to a geometry");
     }
 
-    private org.neo4j.cypher.internal.compiler.v3_1.Geometry makeCypherGeometry(double x, double y, org.neo4j.cypher.internal.compiler.v3_1.CRS crs) {
-        if (crs.equals(org.neo4j.cypher.internal.compiler.v3_1.CRS.Cartesian())) {
-            return new org.neo4j.cypher.internal.compiler.v3_1.CartesianPoint(x, y, crs);
+    private static Object toPublic(Object obj) {
+        if (obj instanceof Map) {
+            return toPublic((Map) obj);
+        } else if (obj instanceof PropertyContainer) {
+            return toPublic(((PropertyContainer) obj).getProperties());
+        } else if (obj instanceof Geometry) {
+            return toMap((Geometry) obj);
         } else {
-            return new org.neo4j.cypher.internal.compiler.v3_1.GeographicPoint(x, y, crs);
+            return obj;
         }
     }
 
-    private org.neo4j.cypher.internal.compiler.v3_1.Geometry makeCypherGeometry(Geometry geometry, org.neo4j.cypher.internal.compiler.v3_1.CRS crs) {
-        if (geometry.getGeometryType().toLowerCase().equals("point")) {
-            Coordinate coordinate = geometry.getCoordinates()[0];
-            return makeCypherGeometry(coordinate.getOrdinate(0), coordinate.getOrdinate(1), crs);
+    private static Map<String, Object> toGeometryMap(Object geometry) {
+        return toMap(toNeo4jGeometry(null, geometry));
+    }
+
+    private static Map<String, Object> toMap(Geometry geometry) {
+        return toMap(toNeo4jGeometry(null, geometry));
+    }
+
+    private static double[] toCoordinateArrayFromDoubles(List<Double> coords) {
+        double[] coordinates = new double[coords.size()];
+        for (int i = 0; i < coordinates.length; i++) {
+            coordinates[i] = coords.get(i);
+        }
+        return coordinates;
+    }
+
+    private static double[][] toCoordinateArrayFromCoordinates(List<org.neo4j.graphdb.spatial.Coordinate> coords) {
+        List<double[]> coordinates = new ArrayList<>(coords.size());
+        for (org.neo4j.graphdb.spatial.Coordinate coord : coords) {
+            coordinates.add(toCoordinateArrayFromDoubles(coord.getCoordinate()));
+        }
+        return toCoordinateArray(coordinates);
+    }
+
+    private static double[][] toCoordinateArray(List<double[]> coords) {
+        double[][] coordinates = new double[coords.size()][];
+        for (int i = 0; i < coordinates.length; i++) {
+            coordinates[i] = coords.get(i);
+        }
+        return coordinates;
+    }
+
+    private static Map<String, Object> toMap(org.neo4j.graphdb.spatial.Geometry geometry) {
+        if (geometry instanceof org.neo4j.graphdb.spatial.Point) {
+            org.neo4j.graphdb.spatial.Point point = (org.neo4j.graphdb.spatial.Point) geometry;
+            return map("type", geometry.getGeometryType(), "coordinate", toCoordinateArrayFromDoubles(point.getCoordinate().getCoordinate()));
         } else {
-            throw new RuntimeException("Cypher only accepts POINT geometries, not " + geometry.getGeometryType());
+            return map("type", geometry.getGeometryType(), "coordinates", toCoordinateArrayFromCoordinates(geometry.getCoordinates()));
         }
     }
 
-    private org.neo4j.cypher.internal.compiler.v3_1.Geometry toCypherGeometry(Layer layer, Object value) {
-        if (value instanceof org.neo4j.cypher.internal.compiler.v3_1.Geometry) {
-            return (org.neo4j.cypher.internal.compiler.v3_1.Geometry) value;
+    private static Map<String, Object> toPublic(Map incoming) {
+        Map<String, Object> map = new HashMap<>(incoming.size());
+        for (Object key : incoming.keySet()) {
+            map.put(key.toString(), toPublic(incoming.get(key)));
         }
-        if (value instanceof org.neo4j.graphdb.spatial.Point) {
-            org.neo4j.graphdb.spatial.Point point = (org.neo4j.graphdb.spatial.Point) value;
-            List<Double> coord = point.getCoordinate().getCoordinate();
-            return makeCypherGeometry(coord.get(0), coord.get(1), org.neo4j.cypher.internal.compiler.v3_1.CRS.fromSRID(point.getCRS().getCode()));
-        }
-        org.neo4j.cypher.internal.compiler.v3_1.CRS crs = org.neo4j.cypher.internal.compiler.v3_1.CRS.Cartesian();
-        if (layer != null) {
-            CoordinateReferenceSystem layerCRS = layer.getCoordinateReferenceSystem();
-            if (layerCRS != null) {
-                ReferenceIdentifier crsRef = layer.getCoordinateReferenceSystem().getName();
-                crs = org.neo4j.cypher.internal.compiler.v3_1.CRS.fromName(crsRef.toString());
-            }
-        }
-        if (value instanceof Geometry) {
-            Geometry geometry = (Geometry) value;
-            if (geometry.getSRID() > 0) {
-                crs = org.neo4j.cypher.internal.compiler.v3_1.CRS.fromSRID(geometry.getSRID());
-            }
-            if (geometry instanceof Point) {
-                Point point = (Point) geometry;
-                return makeCypherGeometry(point.getX(), point.getY(), crs);
-            }
-            return makeCypherGeometry(geometry, crs);
-        }
-        if (value instanceof String) {
-            GeometryFactory factory = (layer == null) ? new GeometryFactory() : layer.getGeometryFactory();
-            WKTReader reader = new WKTReader(factory);
-            try {
-                Geometry geometry = reader.read((String) value);
-                return makeCypherGeometry(geometry, crs);
-            } catch (ParseException e) {
-                throw new IllegalArgumentException("Invalid WKT: " + e.getMessage());
-            }
-        }
-        Map<String, Object> latLon = null;
-        if (value instanceof PropertyContainer) {
-            latLon = ((PropertyContainer) value).getProperties("latitude", "longitude", "lat", "lon");
-            if (layer == null) {
-                crs = org.neo4j.cypher.internal.compiler.v3_1.CRS.WGS84();
-            }
-        }
-        if (value instanceof Map) latLon = (Map<String, Object>) value;
-        Coordinate coord = toCoordinate(latLon);
-        if (coord != null) return makeCypherGeometry(coord.x, coord.y, crs);
-        throw new RuntimeException("Can't convert " + value + " to a geometry");
+        return map;
     }
 
     private static CRS findCRS(String crs) {
         switch (crs) {
-            case "WGS-84":
+            case "WGS-84":      // name in Neo4j CRS table
+            case "WGS84(DD)":   // name in geotools crs library
                 return makeCRS(4326, "WGS-84", "http://spatialreference.org/ref/epsg/4326/");
             case "Cartesian":
                 return makeCRS(7203, "cartesian", "http://spatialreference.org/ref/sr-org/7203/");
@@ -743,27 +819,34 @@ public class SpatialProcedures {
         if (value instanceof Coordinate) {
             return (Coordinate) value;
         }
-        if (value instanceof GeographicPoint) {
-            GeographicPoint point = (GeographicPoint) value;
-            return new Coordinate(point.x(), point.y());
+        if (value instanceof org.neo4j.graphdb.spatial.Coordinate) {
+            return toCoordinate((org.neo4j.graphdb.spatial.Coordinate) value);
+        }
+        if (value instanceof org.neo4j.graphdb.spatial.Point) {
+            return toCoordinate(((org.neo4j.graphdb.spatial.Point) value).getCoordinate());
         }
         if (value instanceof PropertyContainer) {
             return toCoordinate(((PropertyContainer) value).getProperties("latitude", "longitude", "lat", "lon"));
         }
         if (value instanceof Map) {
-            return toCoordinate((Map<String, Object>) value);
+            return toCoordinate((Map) value);
         }
         throw new RuntimeException("Can't convert " + value + " to a coordinate");
     }
 
-    private Coordinate toCoordinate(Map<String, Object> map) {
+    private static Coordinate toCoordinate(org.neo4j.graphdb.spatial.Coordinate point) {
+        List<Double> coordinate = point.getCoordinate();
+        return new Coordinate(coordinate.get(0), coordinate.get(1));
+    }
+
+    private static Coordinate toCoordinate(Map map) {
         if (map == null) return null;
         Coordinate coord = toCoordinate(map, "longitude", "latitude");
         if (coord == null) return toCoordinate(map, "lon", "lat");
         return coord;
     }
 
-    private Coordinate toCoordinate(Map map, String xName, String yName) {
+    private static Coordinate toCoordinate(Map map, String xName, String yName) {
         if (map.containsKey(xName) && map.containsKey(yName))
             return new Coordinate(((Number) map.get(xName)).doubleValue(), ((Number) map.get(yName)).doubleValue());
         return null;

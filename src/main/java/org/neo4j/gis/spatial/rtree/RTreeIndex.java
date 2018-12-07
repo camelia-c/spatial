@@ -2,7 +2,7 @@
  * Copyright (c) 2002-2013 "Neo Technology," Network Engine for Objects in Lund
  * AB [http://neotechnology.com]
  *
- * This file is part of Neo4j.
+ * This file is part of Neo4j Spatial.
  *
  * Neo4j is free software: you can redistribute it and/or modify it under the
  * terms of the GNU General Public License as published by the Free Software
@@ -22,6 +22,10 @@ package org.neo4j.gis.spatial.rtree;
 import java.util.*;
 import java.util.stream.Collectors;
 
+import org.json.simple.JSONObject;
+import org.json.simple.JSONValue;
+import org.neo4j.gis.spatial.index.SpatialIndexWriter;
+import org.neo4j.gis.spatial.encoders.Configurable;
 import org.neo4j.gis.spatial.rtree.filter.SearchFilter;
 import org.neo4j.gis.spatial.rtree.filter.SearchResults;
 import org.neo4j.graphdb.Direction;
@@ -41,7 +45,7 @@ import org.neo4j.graphdb.traversal.Traverser;
 /**
  *
  */
-public class RTreeIndex implements SpatialIndexWriter {
+public class RTreeIndex implements SpatialIndexWriter, Configurable {
 
     public static final String INDEX_PROP_BBOX = "bbox";
 
@@ -55,15 +59,16 @@ public class RTreeIndex implements SpatialIndexWriter {
     public static final long MAX_MAX_NODE_REFERENCES = 1000000;
 
 	private TreeMonitor monitor;
-	// Constructor
-	public RTreeIndex(GraphDatabaseService database, Node rootNode, EnvelopeDecoder envelopeEncoder) {
-		this(database, rootNode, envelopeEncoder, 100);
-	}
-	public void addMonitor(TreeMonitor monitor){
-		this.monitor=monitor;
+
+	public void addMonitor(TreeMonitor monitor) {
+		this.monitor = monitor;
 	}
 
-	public RTreeIndex(GraphDatabaseService database, Node rootNode, EnvelopeDecoder envelopeDecoder, int maxNodeReferences) {
+	public void init(GraphDatabaseService database, Node rootNode, EnvelopeDecoder envelopeEncoder) {
+		init(database, rootNode, envelopeEncoder, 100);
+	}
+
+	public void init(GraphDatabaseService database, Node rootNode, EnvelopeDecoder envelopeDecoder, int maxNodeReferences) {
 		this.database = database;
 		this.rootNode = rootNode;
 		this.envelopeDecoder = envelopeDecoder;
@@ -82,6 +87,24 @@ public class RTreeIndex implements SpatialIndexWriter {
 	public EnvelopeDecoder getEnvelopeDecoder() {
 		return this.envelopeDecoder;
 	}
+
+	@Override
+    public void setConfiguration(String jsonConfig) {
+        JSONObject jsonObject = (JSONObject) JSONValue.parse(jsonConfig);
+        HashMap<String, Object> config = new HashMap<>();
+        for (Object key : jsonObject.keySet()) {
+            config.put(key.toString(), jsonObject.get(key));
+        }
+        configure(config);
+    }
+
+    public String getConfiguration() {
+        HashMap<String, Object> config = new HashMap<>();
+        config.put(KEY_SPLIT, this.splitMode);
+        config.put(KEY_MAX_NODE_REFERENCES, this.maxNodeReferences);
+        config.put(KEY_SHOULD_MERGE_TREES, this.shouldMergeTrees);
+        return JSONObject.toJSONString(config);
+    }
 
     public void configure(Map<String, Object> config) {
         for (String key : config.keySet()) {
@@ -186,11 +209,8 @@ public class RTreeIndex implements SpatialIndexWriter {
 				nodesToAdd.add(n);
 			}
 			nodesToAdd.addAll(geomNodes);
-			for (Node n : getAllIndexInternalNodes()) {
-				if (!n.equals(getIndexRoot())) {
-					deleteNode(n);
-				}
-			}
+			detachGeometryNodes( false, getIndexRoot(), new NullListener() );
+			deleteTreeBelow( getIndexRoot() );
 			buildRtreeFromScratch(getIndexRoot(), decodeGeometryNodeEnvelopes(nodesToAdd), 0.7);
 			countSaved = false;
 			totalGeometryCount = nodesToAdd.size();
@@ -530,10 +550,6 @@ public class RTreeIndex implements SpatialIndexWriter {
 	}
 
 	@Override
-	public void remove(long geomNodeId, boolean deleteGeomNode) {
-		remove(geomNodeId, deleteGeomNode, true);
-	}
-
 	public void remove(long geomNodeId, boolean deleteGeomNode, boolean throwExceptionIfNotFound) {
 		
 		Node geomNode = null;
@@ -601,10 +617,7 @@ public class RTreeIndex implements SpatialIndexWriter {
 		}
 	}
 
-	@Override
-	public void removeAll(final boolean deleteGeomNodes, final Listener monitor) {
-		Node indexRoot = getIndexRoot();
-
+	private void detachGeometryNodes(final boolean deleteGeomNodes, Node indexRoot, final Listener monitor) {
 		monitor.begin(count());
 		try {
 			// delete all geometry nodes
@@ -625,6 +638,13 @@ public class RTreeIndex implements SpatialIndexWriter {
 		} finally {
 			monitor.done();
 		}
+	}
+
+	@Override
+	public void removeAll(final boolean deleteGeomNodes, final Listener monitor) {
+		Node indexRoot = getIndexRoot();
+
+		detachGeometryNodes( deleteGeomNodes, indexRoot, monitor );
 
 		try (Transaction tx = database.beginTx()) {
 			// delete index root relationship
@@ -1074,20 +1094,24 @@ public class RTreeIndex implements SpatialIndexWriter {
     }
 
     private int findLongestDimension(List<NodeWithEnvelope> entries) {
-        Envelope env = new Envelope();
-        for (NodeWithEnvelope entry : entries) {
-            env.expandToInclude(entry.envelope);
-        }
-        int longestDimension = 0;
-        double maxWidth = Double.NEGATIVE_INFINITY;
-        for (int i = 0; i < env.getDimension(); i++) {
-            double width = env.getWidth(i);
-            if (width > maxWidth) {
-                maxWidth = width;
-                longestDimension = i;
+        if (entries.size() > 0) {
+            Envelope env = new Envelope(entries.get(0).envelope);
+            for (NodeWithEnvelope entry : entries) {
+                env.expandToInclude(entry.envelope);
             }
+            int longestDimension = 0;
+            double maxWidth = Double.NEGATIVE_INFINITY;
+            for (int i = 0; i < env.getDimension(); i++) {
+                double width = env.getWidth(i);
+                if (width > maxWidth) {
+                    maxWidth = width;
+                    longestDimension = i;
+                }
+            }
+            return longestDimension;
+        } else {
+            return 0;
         }
-        return longestDimension;
     }
 
     private List<NodeWithEnvelope> extractChildNodesWithEnvelopes(Node indexNode, RelationshipType relationshipType) {
@@ -1342,8 +1366,13 @@ public class RTreeIndex implements SpatialIndexWriter {
 	}
 
 	private double getArea(Envelope e) {
-		return e.getWidth() * e.getHeight();
-		// TODO why not e.getArea(); ?
+		return e.getArea();
+	}
+
+	private void deleteTreeBelow( Node rootNode ) {
+		for ( Relationship relationship : rootNode.getRelationships( RTreeRelationshipTypes.RTREE_CHILD, Direction.OUTGOING )) {
+			deleteRecursivelySubtree( relationship.getEndNode(), relationship );
+		}
 	}
 
 	private void deleteRecursivelySubtree(Node node, Relationship incoming) {

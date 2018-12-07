@@ -1,20 +1,20 @@
 /**
- * Copyright (c) 2010-2013 "Neo Technology,"
+ * Copyright (c) 2010-2017 "Neo Technology,"
  * Network Engine for Objects in Lund AB [http://neotechnology.com]
  *
- * This file is part of Neo4j.
+ * This file is part of Neo4j Spatial.
  *
  * Neo4j is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 package org.neo4j.gis.spatial;
@@ -33,6 +33,9 @@ import org.junit.Test;
 import org.neo4j.gis.spatial.encoders.SimpleGraphEncoder;
 import org.neo4j.gis.spatial.encoders.SimplePointEncoder;
 import org.neo4j.gis.spatial.encoders.SimplePropertyEncoder;
+import org.neo4j.gis.spatial.index.LayerGeohashPointIndex;
+import org.neo4j.gis.spatial.index.LayerIndexReader;
+import org.neo4j.gis.spatial.index.LayerRTreeIndex;
 import org.neo4j.gis.spatial.osm.OSMGeometryEncoder;
 import org.neo4j.gis.spatial.osm.OSMLayer;
 import org.neo4j.gis.spatial.pipes.GeoPipeline;
@@ -58,10 +61,18 @@ public class LayersTest extends Neo4jTestCase
     }
 
     @Test
-    public void testPointLayer()
-    {
-        SpatialDatabaseService db = new SpatialDatabaseService( graphDb() );
-        EditableLayer layer = (EditableLayer) db.createLayer("test", SimplePointEncoder.class, EditableLayerImpl.class, "lon:lat");
+    public void testPointLayerWithRTree() {
+        testPointLayer(LayerRTreeIndex.class);
+    }
+
+    @Test
+    public void testPointLayerWithGeohash() {
+        testPointLayer(LayerGeohashPointIndex.class);
+    }
+
+    private void testPointLayer(Class<? extends LayerIndexReader> indexClass) {
+        SpatialDatabaseService db = new SpatialDatabaseService(graphDb());
+        EditableLayer layer = (EditableLayer) db.createLayer("test", SimplePointEncoder.class, EditableLayerImpl.class, indexClass, "lon:lat");
         assertNotNull( layer );
         SpatialDatabaseRecord record = layer.add( layer.getGeometryFactory().createPoint(
                 new Coordinate( 15.3, 56.2 ) ) );
@@ -90,7 +101,7 @@ public class LayersTest extends Neo4jTestCase
     public void testDeleteGeometry()
     {
         SpatialDatabaseService db = new SpatialDatabaseService( graphDb() );
-        EditableLayer layer = (EditableLayer) db.createLayer("test", SimplePointEncoder.class, EditableLayerImpl.class, "lon:lat");
+        EditableLayer layer = (EditableLayer) db.createLayer("test", SimplePointEncoder.class, EditableLayerImpl.class, null, "lon:lat");
         assertNotNull( layer );
         SpatialDatabaseRecord record = layer.add( layer.getGeometryFactory().createPoint(
                 new Coordinate( 15.3, 56.2 ) ) );
@@ -294,7 +305,7 @@ public class LayersTest extends Neo4jTestCase
 //        GraphDatabaseService db = new GraphDatabaseFactory().newEmbeddedDatabase(dbPath.getCanonicalPath());
         GraphDatabaseService db = graphDb();
         SpatialDatabaseService sdbs = new SpatialDatabaseService(db);
-        EditableLayer layer = sdbs.getOrCreatePointLayer("Coordinates", "lat", "lon");
+        EditableLayer layer = sdbs.getOrCreatePointLayer("Coordinates", "rtree", "lat", "lon");
 
         Random rand = new Random();
 

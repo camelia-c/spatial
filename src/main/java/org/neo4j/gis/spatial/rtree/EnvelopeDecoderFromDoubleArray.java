@@ -2,7 +2,7 @@
  * Copyright (c) 2002-2013 "Neo Technology,"
  * Network Engine for Objects in Lund AB [http://neotechnology.com]
  *
- * This file is part of Neo4j.
+ * This file is part of Neo4j Spatial.
  *
  * Neo4j is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -43,8 +43,8 @@ public class EnvelopeDecoderFromDoubleArray implements EnvelopeDecoder {
 			double[] bbox = (double[]) propValue;
 			return new Envelope(bbox[0], bbox[2], bbox[1], bbox[3]);
 	    } else {
-	    	// invalid content
-	    	return new Envelope();
+            // invalid content
+            return new Envelope(new double[0]);
 	    }
 	}
 

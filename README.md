@@ -92,7 +92,7 @@ This is more complex because the current OSMImporter class runs in two phases, t
     config.put("neostore.nodestore.db.mapped_memory", "90M" );
     config.put("dump_configuration", "true");
     config.put("use_memory_mapped_buffers", "true");
-    BatchInserter batchInserter = new BatchInserterImpl(dir, config);
+    BatchInserter batchInserter = BatchInserters.inserter(new File(dir), config);
     importer.importFile(batchInserter, "sweden.osm", false);
     batchInserter.shutdown();
 
@@ -220,8 +220,15 @@ The Neo4j Spatial Plugin is available for inclusion in the server version of Neo
   * [v0.19 for Neo4j 3.0.3](https://github.com/neo4j-contrib/m2/blob/master/releases/org/neo4j/neo4j-spatial/0.19-neo4j-3.0.3/neo4j-spatial-0.19-neo4j-3.0.3-server-plugin.jar?raw=true)
 * Using GeoTools 14.4 (for GeoServer 2.8.4):
   * [v0.23 for Neo4j 3.0.4](https://github.com/neo4j-contrib/m2/blob/master/releases/org/neo4j/neo4j-spatial/0.23-neo4j-3.0.4/neo4j-spatial-0.23-neo4j-3.0.4-server-plugin.jar?raw=true)
-  * [v0.24 for Neo4j 3.0.8](https://github.com/neo4j-contrib/m2/blob/master/releases/org/neo4j/neo4j-spatial/0.24-neo4j-3.0.8/neo4j-spatial-0.24-neo4j-3.0.8-server-plugin.jar?raw=true)
-  * [v0.24 for Neo4j 3.1.1](https://github.com/neo4j-contrib/m2/blob/master/releases/org/neo4j/neo4j-spatial/0.24-neo4j-3.1.1/neo4j-spatial-0.24-neo4j-3.1.1-server-plugin.jar?raw=true)
+  * [v0.24.1 for Neo4j 3.0.8](https://github.com/neo4j-contrib/m2/blob/master/releases/org/neo4j/neo4j-spatial/0.24.1-neo4j-3.0.8/neo4j-spatial-0.24.1-neo4j-3.0.8-server-plugin.jar?raw=true)
+  * [v0.24.1 for Neo4j 3.1.1](https://github.com/neo4j-contrib/m2/blob/master/releases/org/neo4j/neo4j-spatial/0.24.1-neo4j-3.1.1/neo4j-spatial-0.24.1-neo4j-3.1.1-server-plugin.jar?raw=true)
+  * [v0.24.1 for Neo4j 3.2.5](https://github.com/neo4j-contrib/m2/blob/master/releases/org/neo4j/neo4j-spatial/0.24.1-neo4j-3.2.5/neo4j-spatial-0.24.1-neo4j-3.2.5-server-plugin.jar?raw=true)
+  * [v0.25.1 for Neo4j 3.0.8](https://github.com/neo4j-contrib/m2/blob/master/releases/org/neo4j/neo4j-spatial/0.25.1-neo4j-3.0.8/neo4j-spatial-0.25.1-neo4j-3.0.8-server-plugin.jar?raw=true)
+  * [v0.25.3 for Neo4j 3.1.4](https://github.com/neo4j-contrib/m2/blob/master/releases/org/neo4j/neo4j-spatial/0.25.3-neo4j-3.1.4/neo4j-spatial-0.25.3-neo4j-3.1.4-server-plugin.jar?raw=true)
+  * [v0.25.4 for Neo4j 3.2.8](https://github.com/neo4j-contrib/m2/blob/master/releases/org/neo4j/neo4j-spatial/0.25.4-neo4j-3.2.8/neo4j-spatial-0.25.4-neo4j-3.2.8-server-plugin.jar?raw=true)
+  * [v0.25.5 for Neo4j 3.3.5](https://github.com/neo4j-contrib/m2/blob/master/releases/org/neo4j/neo4j-spatial/0.25.5-neo4j-3.3.5/neo4j-spatial-0.25.5-neo4j-3.3.5-server-plugin.jar?raw=true)
+  * [v0.25.6 for Neo4j 3.4.5](https://github.com/neo4j-contrib/m2/blob/master/releases/org/neo4j/neo4j-spatial/0.25.6-neo4j-3.4.5/neo4j-spatial-0.25.6-neo4j-3.4.5-server-plugin.jar?raw=true)
+  * [v0.25.7 for Neo4j 3.4.9](https://github.com/neo4j-contrib/m2/blob/master/releases/org/neo4j/neo4j-spatial/0.25.7-neo4j-3.4.9/neo4j-spatial-0.25.7-neo4j-3.4.9-server-plugin.jar?raw=true)
 
 For versions up to 0.15-neo4j-2.3.4:
 
@@ -337,7 +344,7 @@ Add the following repositories and dependency to your project's pom.xml:
     <dependency>
         <groupId>org.neo4j</groupId>
         <artifactId>neo4j-spatial</artifactId>
-        <version>0.24-neo4j-3.1.1</version>
+        <version>0.25.7-neo4j-3.4.9</version>
     </dependency>
 ~~~
 

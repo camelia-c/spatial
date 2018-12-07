@@ -1,20 +1,20 @@
 /**
- * Copyright (c) 2010-2013 "Neo Technology,"
+ * Copyright (c) 2010-2017 "Neo Technology,"
  * Network Engine for Objects in Lund AB [http://neotechnology.com]
  *
- * This file is part of Neo4j.
+ * This file is part of Neo4j Spatial.
  *
  * Neo4j is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 package org.neo4j.gis.spatial.server.plugin;
@@ -24,6 +24,7 @@ import com.vividsolutions.jts.io.ParseException;
 import com.vividsolutions.jts.io.WKTReader;
 import org.neo4j.gis.spatial.*;
 import org.neo4j.gis.spatial.pipes.GeoPipeline;
+import org.neo4j.gis.spatial.pipes.processing.OrthodromicDistance;
 import org.neo4j.graphdb.GraphDatabaseService;
 import org.neo4j.graphdb.Node;
 import org.neo4j.graphdb.Transaction;
@@ -46,10 +47,11 @@ public class SpatialPlugin extends ServerPlugin {
             @Source GraphDatabaseService db,
             @Description("The layer to find or create.") @Parameter(name = "layer") String layer,
             @Description("The node property that contains the latitude. Default is 'lat'") @Parameter(name = "lat", optional = true) String lat,
-            @Description("The node property that contains the longitude. Default is 'lon'") @Parameter(name = "lon", optional = true) String lon) {
+            @Description("The node property that contains the longitude. Default is 'lon'") @Parameter(name = "lon", optional = true) String lon,
+            @Description("The type of index to use. Default is 'rtree'") @Parameter(name = "index", optional = true) String index) {
         System.out.println("Creating new layer '" + layer + "' unless it already exists");
         SpatialDatabaseService spatialService = getSpatialDatabaseService(db);
-        return singleton(spatialService.getOrCreatePointLayer(layer, lon, lat).getLayerNode());
+        return singleton(spatialService.getOrCreatePointLayer(layer, index, lon, lat).getLayerNode());
     }
 
     @PluginTarget(GraphDatabaseService.class)
@@ -179,27 +181,6 @@ public class SpatialPlugin extends ServerPlugin {
     }
 
     @PluginTarget(GraphDatabaseService.class)
-    @Description("update an existing geometry specified in WKT format. The layer must already contain the record.")
-    public Iterable<Node> updateGeometryFromWKT(@Source GraphDatabaseService db,
-                                                @Description("The geometry in WKT to add to the layer") @Parameter(name = "geometry") String geometryWKT,
-                                                @Description("The geometry node id") @Parameter(name = "geometryNodeId") long geometryNodeId,
-                                                @Description("The layer to add the node to.") @Parameter(name = "layer") String layer) {
-        SpatialDatabaseService spatialService = getSpatialDatabaseService(db);
-        try (Transaction tx = db.beginTx()) {
-            EditableLayer spatialLayer = (EditableLayer) spatialService.getLayer(layer);
-            WKTReader reader = new WKTReader(spatialLayer.getGeometryFactory());
-            Geometry geometry = reader.read(geometryWKT);
-            SpatialDatabaseRecord record = spatialLayer.getIndex().get(geometryNodeId);
-            spatialLayer.getGeometryEncoder().encodeGeometry(geometry, record.getGeomNode());
-            tx.success();
-            return singleton(record.getGeomNode());
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-        return null;
-    }
-
-    @PluginTarget(GraphDatabaseService.class)
     @Description("search a layer for geometries in a bounding box. To achieve more complex CQL searches, pre-define the dynamic layer with addCQLDynamicLayer.")
     public Iterable<Node> findGeometriesInBBox(
             @Source GraphDatabaseService db,
@@ -299,7 +280,7 @@ public class SpatialPlugin extends ServerPlugin {
 
             List<Node> result = GeoPipeline
                     .startNearestNeighborLatLonSearch(layer, new Coordinate(pointX, pointY), distanceInKm)
-                    .sort("OrthodromicDistance").toNodeList();
+                    .sort(OrthodromicDistance.DISTANCE).toNodeList();
             tx.success();
             return result;
         }

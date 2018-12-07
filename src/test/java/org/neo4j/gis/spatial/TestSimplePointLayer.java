@@ -1,20 +1,20 @@
 /**
- * Copyright (c) 2010-2013 "Neo Technology,"
+ * Copyright (c) 2010-2017 "Neo Technology,"
  * Network Engine for Objects in Lund AB [http://neotechnology.com]
  *
- * This file is part of Neo4j.
+ * This file is part of Neo4j Spatial.
  *
  * Neo4j is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
+ * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 package org.neo4j.gis.spatial;
@@ -29,6 +29,7 @@ import junit.framework.AssertionFailedError;
 
 import org.geotools.data.neo4j.StyledImageExporter;
 import org.junit.Test;
+import org.neo4j.gis.spatial.pipes.processing.OrthodromicDistance;
 import org.neo4j.gis.spatial.rtree.Envelope;
 import org.neo4j.gis.spatial.pipes.GeoPipeFlow;
 import org.neo4j.gis.spatial.pipes.GeoPipeline;
@@ -107,7 +108,7 @@ public class TestSimplePointLayer extends Neo4jTestCase {
 
             List<GeoPipeFlow> results = GeoPipeline
                 .startNearestNeighborLatLonSearch(layer, new Coordinate(centre[0] + 0.1, centre[1]), 10.0)
-                .sort("OrthodromicDistance").toList();
+                .sort(OrthodromicDistance.DISTANCE).toList();
 
             saveResultsAsImage(results, "temporary-results-layer-" + layer.getName(), 130, 70);
             assertEquals(71, results.size());
@@ -115,7 +116,7 @@ public class TestSimplePointLayer extends Neo4jTestCase {
 
             results = GeoPipeline
                 .startNearestNeighborLatLonSearch(layer, new Coordinate(centre[0] + 0.1, centre[1]), 5.0)
-                .sort("OrthodromicDistance").toList();
+                .sort(OrthodromicDistance.DISTANCE).toList();
 
             saveResultsAsImage(results, "temporary-results-layer2-" + layer.getName(), 130, 70);
             assertEquals(30, results.size());
@@ -217,8 +218,8 @@ public class TestSimplePointLayer extends Neo4jTestCase {
 		for (int i = 0; i < results.size() - 1; i++) {
 			GeoPipeFlow first = results.get(i);
 			GeoPipeFlow second = results.get(i + 1);
-			double d1 = (Double) first.getProperties().get("OrthodromicDistance");
-			double d2 = (Double) second.getProperties().get("OrthodromicDistance");
+			double d1 = (Double) first.getProperties().get(OrthodromicDistance.DISTANCE);
+			double d2 = (Double) second.getProperties().get(OrthodromicDistance.DISTANCE);
 			assertTrue("Point at position " + i + " (d=" + d1 + ") must be closer than point at position " + (i + 1) + " (d=" + d2
 					+ ")", d1 <= d2);
 		}
@@ -249,7 +250,7 @@ public class TestSimplePointLayer extends Neo4jTestCase {
             // Repeat with sorting
             results = GeoPipeline
                 .startNearestNeighborLatLonSearch(layer, new Coordinate(centre[0], centre[1]), 10.0)
-                .sort("OrthodromicDistance")
+                .sort(OrthodromicDistance.DISTANCE)
                 .toSpatialDatabaseRecordList();
             saveResultsAsImage(results, "temporary-results-layer-sorted-" + layer.getName(), 150, 150);
             assertEquals(456, results.size());
